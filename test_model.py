@@ -3,9 +3,9 @@ from stable_baselines3 import A2C,PPO
 from nes_py.wrappers import JoypadSpace
 import gym_super_mario_bros
 from gym_super_mario_bros.actions import SIMPLE_MOVEMENT
+from my_obs import make_env
 
-env = gym_super_mario_bros.make('SuperMarioBros-v2')
-env = JoypadSpace(env, SIMPLE_MOVEMENT)
+env = make_env()
 model = PPO.load("ppo_mario.zip",env=env)
 
 obs = env.reset()

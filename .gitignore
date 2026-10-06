@@ -4,3 +4,4 @@ recycle
 .claude
 study.md
 ppo_mario.zip
+__pycache__/
