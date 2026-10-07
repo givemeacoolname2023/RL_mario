@@ -4,9 +4,12 @@ from nes_py.wrappers import JoypadSpace
 import gym_super_mario_bros
 from gym_super_mario_bros.actions import SIMPLE_MOVEMENT
 from my_obs import make_env
+from stable_baselines3.common.vec_env import VecFrameStack, DummyVecEnv
 
 env = make_env()
-model = PPO.load("ppo_mario.zip",env=env)
+env = DummyVecEnv([lambda: env])
+env =  VecFrameStack(env, n_stack=4,channels_order="last")
+model = PPO.load("best_model/best_model.zip",env=env)
 
 obs = env.reset()
 for i in range(1000):
