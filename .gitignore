@@ -7,3 +7,4 @@ ppo_mario.zip
 __pycache__/
 best_model/
 callback_logs/
+checkpoints/
