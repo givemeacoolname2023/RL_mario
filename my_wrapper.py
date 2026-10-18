@@ -82,7 +82,7 @@ class MarioRewardWrapper(gym.Wrapper):
         self._prev_life = life
 
         # 4) 可选的小额时间惩罚，抑制原地磨蹭（默认 0，别乱开）
-        # shaped -= self.time_penalty
+        shaped -= self.time_penalty
 
         info["x_best"] = self._best_x  # 方便调试
         return obs, shaped, done, info

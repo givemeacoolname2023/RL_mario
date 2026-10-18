@@ -13,7 +13,7 @@ def make_env(rank=0): #比较消耗CPU。现在是闭包了
         env = gym_super_mario_bros.make('SuperMarioBros-v2')
         env = JoypadSpace(env, SIMPLE_MOVEMENT)
         env = SkipFrameWrapper(env, skip=4)
-        env = MarioRewardWrapper(env)   # 新增奖励重构
+        env = MarioRewardWrapper(env,time_penalty=0.01)   # 新增奖励重构
         env = GrayScaleObservation(env,keep_dim=True)
         env = ResizeObservation(env, (84, 84))
         return env
