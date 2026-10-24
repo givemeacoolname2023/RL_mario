@@ -4,6 +4,18 @@ from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
 
 from my_obs import make_env # 手写的构造环境包
 
+# ---- 学习率衰减 ----
+# progress_remaining 由 SB3 根据 total_timesteps 自动计算：训练剩余进度
+# 训练开始时为 1.0，结束时为 0.0。
+# 避免最后阶段学习率归零、完全停止更新。
+def lr_schedule(progress_remaining: float) -> float:
+    start_lr = 3e-4
+    end_lr = 1e-5
+    decay_fraction = 0.8    # 前 80% 的训练进度里从 3e-4 线性降到 1e-5，之后保持 1e-5，
+    progress = min(1.0, (1.0 - progress_remaining) / decay_fraction)
+    return start_lr + (end_lr - start_lr) * progress    # 线性衰减,把progress当成线性函数的x
+
+
 def main():
     n_envs = 4
 
@@ -38,11 +50,11 @@ def main():
     
     """
     model = PPO("CnnPolicy", vec_env, verbose=1,tensorboard_log="logs",
-                learning_rate=3e-4,  # 学习率
+                learning_rate=lr_schedule,  # 学习率：3e-4 → 1e-5，前 80% 进度完成衰减
                 n_steps=1024,   # 训练之前的收集阶段，每个环境收集多少步经验;和内存相关
                 batch_size=256,  # 一个epoch里每次梯度更新需要的样本数；和显存相关:resize84×84 之后显存完全不是瓶颈了，可以放心加大
                 n_epochs=4,    # 每个epoch训练所有的数据，一共4轮
-                ent_coef=0.03,   # 每一点熵，就奖励0.03。数值越大，策略更随机，更爱探索。
+                ent_coef=0.05,   # 每一点熵，就奖励0.05。数值越大，策略更随机，更爱探索。
                 # target_kl=0.1,  # KL散度阈值，超过这个值就停止PPO训练,重新进入收集阶段
                 gamma=0.99,   # 折扣因子，越接近1，越看重未来奖励
                 )
@@ -52,7 +64,7 @@ def main():
     total_timesteps 是总环境步数预算。每次 PPO 更新前，尽量收集 n_steps * n_envs 步。
     累计达到 total_timesteps 后停止。最后一次可能不满一批，而且可能不进行 PPO 训练。
     """
-    model.learn(total_timesteps=5e6,callback=[eval_callback, checkpoint_callback])  # 训练500万步
+    model.learn(total_timesteps=1e7,callback=[eval_callback, checkpoint_callback])  # 训练1000万步
     model.save("ppo_mario")
 
 if __name__ == "__main__":
