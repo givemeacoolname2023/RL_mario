@@ -8,3 +8,4 @@ __pycache__/
 best_model/
 callback_logs/
 checkpoints/
+models/

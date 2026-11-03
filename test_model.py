@@ -5,15 +5,15 @@ from stable_baselines3.common.vec_env import VecFrameStack, DummyVecEnv
 
 env = DummyVecEnv([make_env()])
 env =  VecFrameStack(env, n_stack=4,channels_order="last")
-model = PPO.load("best_model/best_model.zip",env=env)
+model = PPO.load("models\\full\\best_model.zip",env=env)
 
 obs = env.reset()
-for i in range(500):
+for i in range(2000):
     obs = obs.copy()  # Copy the observation to avoid modifying the original
     action, _state = model.predict(obs, deterministic=True)
     obs, reward, done, info = env.step(action)
     env.render()
-    time.sleep(0.05)      # ← 新增这一行
+    # time.sleep(0.05)      # ← 新增这一行
     if done:
       # obs = env.reset()
       break
