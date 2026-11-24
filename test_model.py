@@ -5,7 +5,7 @@ from stable_baselines3.common.vec_env import VecFrameStack, DummyVecEnv
 
 env = DummyVecEnv([make_env()])
 env =  VecFrameStack(env, n_stack=4,channels_order="last")
-model = PPO.load("models\\full\\best_model.zip",env=env)
+model = PPO.load("models\\1-3\\best_model.zip",env=env)
 
 obs = env.reset()
 for i in range(2000):
