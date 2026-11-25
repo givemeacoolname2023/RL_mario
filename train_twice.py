@@ -100,8 +100,45 @@ class RandomNoopStart(gym.Wrapper):
         return obs
 
 
+class FrontierStart(gym.Wrapper):
+    """第一次跑到 start_x 就把那帧的 NES 状态存成检查点, 之后每局都从那里开始。
+
+    为什么需要: 1-3 的死点在 x≈645 之后(右侧整屏没有静态落脚点, 要等升降台)。
+    但这一决策出现在整局第 46 步, 回报要到第 66 步才结算, PPO 的探索够不着 ——
+    而且"一路右跑然后死"拿 +59 分, 比"停下等"的 −15 分还高, 送死是局部最优。
+    把起点挪到死点前, 关键决策就落到开局前 5 步, 每局都变成一次"在边缘怎么办"的采样。
+
+    思路来自 Go-Explore (Ecoffet et al., Nature 2021) 的 "return then explore"
+    和 reverse curriculum generation (Florensa et al., CoRL 2017),
+    这里简化成一个固定检查点, 不维护状态档案。
+
+    机制: nes_py 只有一个备份槽, reset() 从它恢复。覆盖它, reset() 就回到检查点。
+    """
+
+    def __init__(self, env, start_x=600):
+        super().__init__(env)
+        self.start_x = start_x
+        self._captured = False
+        self._last_y = None
+
+    def step(self, action):
+        obs, reward, done, info = self.env.step(action)
+        # 判据: 连续两步 y 不变 = 踩在实地上。
+        # 不能用 _y_viewport == 1, 坠落时它也是 1, 存到半空就全废了。
+        y = info["y_pos"]
+        standing = (y == self._last_y)
+        self._last_y = y
+        if (not self._captured and standing and not done
+                and info["x_pos"] >= self.start_x):
+            self.env.unwrapped._backup()      # 覆盖 base env 的备份槽
+            self._captured = True
+            print(f"[检查点] 已固化在 x={info['x_pos']}, 之后每局从这里开始",
+                  flush=True)
+        return obs, reward, done, info
+
+
 def make_env(rank, env_id, single_stage, time_penalty=0.01, death_penalty=15.0,
-             random_noop=0):
+             random_noop=0, start_x=0):
     """复刻 my_obs.make_env 的包装链, 只是把关卡和奖励参数变成可配的。
 
     rank 目前只用于区分进程, 不影响行为。
@@ -115,6 +152,10 @@ def make_env(rank, env_id, single_stage, time_penalty=0.01, death_penalty=15.0,
                                  death_penalty=death_penalty)
         if single_stage:
             env = DeathPenaltyOnDone(env, penalty=death_penalty)
+        # 检查点必须在 RandomNoopStart 内侧: NOOP 要作用在检查点上,
+        # 这样才能平移升降台的相位(策略此刻就在决策点旁边)
+        if single_stage and start_x > 0:
+            env = FrontierStart(env, start_x=start_x)
         # 只在训练环境挂: 评估要保持确定性, best_model 才有可比性
         if random_noop > 0:
             env = RandomNoopStart(env, max_noop=random_noop)
@@ -126,12 +167,16 @@ def make_env(rank, env_id, single_stage, time_penalty=0.01, death_penalty=15.0,
 
 
 def build_vec_env(n, env_id, single_stage, time_penalty, death_penalty,
-                  random_noop=0, offset=0):
-    vec_env = SubprocVecEnv([
-        make_env(offset + i, env_id, single_stage, time_penalty, death_penalty,
-                 random_noop)
-        for i in range(n)
-    ])
+                  random_noop=0, start_x=0, frontier_prob=0.0, offset=0):
+    # nes_py 只有一个备份槽, 抓了检查点就再也回不到关卡开头。
+    # 所以只让 frontier_prob 比例的 worker 抓, 其余每局仍从关卡开头跑,
+    # 免得采样起点全挤在死点、策略忘了怎么从开头跑过来。
+    env_fns = []
+    for i in range(n):
+        this_start_x = start_x if (start_x > 0 and i / n < frontier_prob) else 0
+        env_fns.append(make_env(offset + i, env_id, single_stage, time_penalty,
+                                death_penalty, random_noop, this_start_x))
+    vec_env = SubprocVecEnv(env_fns)
     vec_env = VecFrameStack(vec_env, n_stack=4, channels_order="last")
     vec_env = VecMonitor(vec_env)
     return vec_env
@@ -170,13 +215,15 @@ def train(args):
     n_envs = args.n_envs
     vec_env = build_vec_env(n_envs, stage["env_id"], stage["single_stage"],
                             args.time_penalty, args.death_penalty,
-                            random_noop=args.random_noop, offset=0)
+                            random_noop=args.random_noop,
+                            start_x=args.start_x,
+                            frontier_prob=args.frontier_prob, offset=0)
     # 评估环境必须是独立的一套, 不能复用训练环境。
     # 评估故意不开随机起手: 完整游戏进 1-3 时就是关卡加载后立刻给第一个动作,
     # 等价于 noop=0, 这样选出来的 best_model 才正好是"能迁移"的那一份。
     eval_env = build_vec_env(n_envs, stage["env_id"], stage["single_stage"],
                              args.time_penalty, args.death_penalty,
-                             random_noop=0, offset=100)
+                             random_noop=0, start_x=0, offset=100)
     # PPO 会自动给训练环境套一层 VecTransposeImage(HWC -> CHW), 评估环境手动跟上,
     # 否则 EvalCallback 会刷 "Training and eval env are not of the same type" 警告。
     eval_env = VecTransposeImage(eval_env)
@@ -200,6 +247,11 @@ def train(args):
     print(f"[环境] {stage['env_id']}  n_envs={n_envs}")
     if args.random_noop > 0:
         print(f"[随机起手] 每局开头随机 NOOP 0~{args.random_noop} 次")
+    if args.start_x > 0:
+        n_frontier = sum(1 for i in range(args.n_envs)
+                         if i / args.n_envs < args.frontier_prob)
+        print(f"[检查点] {n_frontier}/{args.n_envs} 个 worker 跑到 x>={args.start_x}"
+              f" 时存档, 之后从那里开局")
     print(f"[步数] 本次再训 {int(args.timesteps):,} 步")
     print(f"[学习率] {args.lr_start} -> {args.lr_end}")
     print(f"[存档] {run_dir}")
@@ -245,21 +297,42 @@ def evaluate(args):
         done = False
         total, max_x, flag = 0.0, 0, False
         lv_world, lv_stage = 0, 0          # 走到的最远关卡, 打完几关一眼可见
+        start_x, end_x, steps = None, 0, 0
+        milestone = 0                       # 上一次打过卡的百位刻度
         while not done:
             action, _state = model.predict(obs, deterministic=True)
             obs, reward, done, info = env.step(action)
             total += float(reward[0])
             x = info[0]["x_pos"]                     # DummyVecEnv 的 info 是 list
+            y, tleft = info[0]["y_pos"], info[0]["time"]
+            if start_x is None:
+                start_x = x
             if x > max_x:                            # 只在刷新最远距离时记录关卡
                 max_x = x
                 lv_world, lv_stage = info[0]["world"], info[0]["stage"]
             flag = flag or bool(info[0]["flag_get"])
+            steps += 1
+            end_x = x
+
+            if args.show_x:
+                # 里程碑: 每越过 100 打一条持久日志, 跑完能往上翻着对照画面。
+                # y 是 255-屏幕像素y, 越大越高; y 恒定=站住了, 单调下降=在坠落。
+                if x // 100 > milestone // 100:
+                    milestone = x
+                    print(f"\n[里程碑] x={x:5d}  y={y:4d}  时间={tleft:3d}")
+                print(f"\r  x={x:5d}  y={y:4d}  时间={tleft:3d}  帧={steps:4d}",
+                      end="", flush=True)
+
             if not args.headless:
                 env.render()
                 time.sleep(args.delay)
             done = bool(done[0])
+        if args.show_x:
+            print()                                  # 收掉 \r 那一行
         print(f"  第 {ep + 1} 局: 最远 x={max_x}  关卡={lv_world}-{lv_stage}  "
               f"reward={total:.1f}  {'* 举旗通关' if flag else '未通关'}")
+        if args.show_x:
+            print(f"    起点 x={start_x}  结束于 x={end_x}  ({steps} 帧)")
 
 
 def parse_args():
@@ -284,7 +357,16 @@ def parse_args():
     # 只在训练环境生效, 评估环境恒为 0。
     p.add_argument("--random-noop", type=int, default=0,
                    help="每局开头随机 NOOP 0~N 次, 破解确定性死锁; 0 = 关闭")
+    # 检查点重启: 跑到 x>=N 且站稳时存档, 之后每局从那里开始。
+    # 只在训练环境生效; 评估永远从关卡开头跑, 分数才代表真实全程表现。
+    p.add_argument("--start-x", type=int, default=0,
+                   help="检查点位置; 跑到 x>=N 后每局从那里开局; 0 = 关闭")
+    p.add_argument("--frontier-prob", type=float, default=0.0,
+                   help="多大比例的训练 worker 使用检查点(0~1)")
     p.add_argument("--eval", action="store_true", help="只评估, 不训练")
+    # 边看画面边记位置: 用来给 --start-x 挑一个落在实地上、且有站立空间的点。
+    p.add_argument("--show-x", action="store_true",
+                   help="评估时实时打印马里奥的世界坐标 x/y (x 就是 --start-x 的刻度)")
     p.add_argument("--episodes", type=int, default=1)
     p.add_argument("--headless", action="store_true", help="评估时不渲染")
     p.add_argument("--delay", type=float, default=0.05)
